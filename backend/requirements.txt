@@ -1,0 +1,12 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+opencv-python-headless==4.10.0.84
+numpy==1.26.4
+scipy==1.13.1
+pydantic==2.9.2
+
+# Optional: only needed if you enable the YOLOv8-nano cone detector
+# (falls back to a classical-CV cone detector automatically if missing
+# or if backend/models/cone_yolov8n.pt is not present)
+ultralytics==8.2.103

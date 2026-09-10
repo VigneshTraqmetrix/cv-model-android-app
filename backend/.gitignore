@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Custom-trained cone weights are usually large binary files best tracked
+# via git-lfs or a model registry, not committed straight into git.
+models/*.pt
+!models/.gitkeep
+
+# Scratch files produced while testing locally
+tests/sample.png
+tests/debug_*.png
+tests/debug_*.jpg

@@ -1,0 +1,25 @@
+{
+  "expo": {
+    "name": "Cone & Rice Counter",
+    "slug": "cone-rice-counter",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "platforms": ["android", "ios"],
+    "android": {
+      "package": "com.traqmetrix.conericeCounter",
+      "permissions": ["CAMERA"],
+      "adaptiveIcon": {
+        "backgroundColor": "#1F2933"
+      }
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow $(PRODUCT_NAME) to use the camera to capture cones and rice grains for counting."
+        }
+      ]
+    ]
+  }
+}
