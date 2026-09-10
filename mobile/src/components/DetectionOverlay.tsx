@@ -1,4 +1,4 @@
-import Svg, { Rect, Text as SvgText } from "react-native-svg";
+import Svg, { G, Rect, Text as SvgText } from "react-native-svg";
 
 import type { Detection } from "@/types";
 
@@ -49,7 +49,7 @@ export default function DetectionOverlay({
         const fontSize = det.kind === "cone" ? 16 : 11;
 
         return (
-          <Svg.Fragment key={`${det.kind}-${det.id}`}>
+          <G key={`${det.kind}-${det.id}`}>
             <Rect x={x} y={y} width={w} height={h} stroke={color} strokeWidth={2} fill="none" rx={2} />
             <Rect
               x={x}
@@ -68,7 +68,7 @@ export default function DetectionOverlay({
             >
               {det.id}
             </SvgText>
-          </Svg.Fragment>
+          </G>
         );
       })}
     </Svg>
