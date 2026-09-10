@@ -1,12 +1,18 @@
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
-python-multipart==0.0.9
-opencv-python-headless==4.10.0.84
-numpy==1.26.4
-scipy==1.13.1
-pydantic==2.9.2
+# Minimum-version bounds rather than exact pins: opencv/numpy only ship
+# prebuilt wheels for actively-supported Python versions, so hard-pinning
+# an older patch version breaks installs on newer Python releases (e.g. a
+# numpy/opencv version predating Python 3.13 forces pip to compile from
+# source, which needs a full C/C++ toolchain most machines don't have).
+# Letting pip pick within these ranges gets you a version with a wheel for
+# whatever interpreter you're actually running.
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+python-multipart>=0.0.9,<1
+opencv-python-headless>=4.10,<5
+numpy>=1.26,<3
+pydantic>=2.9,<3
 
 # Optional: only needed if you enable the YOLOv8-nano cone detector
 # (falls back to a classical-CV cone detector automatically if missing
 # or if backend/models/cone_yolov8n.pt is not present)
-ultralytics==8.2.103
+ultralytics>=8.2,<9
