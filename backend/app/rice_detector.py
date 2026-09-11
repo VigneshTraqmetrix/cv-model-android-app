@@ -3,11 +3,20 @@
 Pipeline (why each step, not just what it does):
 
 1. Grayscale + Gaussian blur -> suppress sensor noise before thresholding.
-2. Otsu threshold -> rice on a contrasting tray/paper background separates
-   cleanly on brightness alone; Otsu picks the split point automatically so
-   this works across different lighting without a magic constant.
-3. Morphological opening -> strips tiny speckle noise (dust, sensor grain)
-   that would otherwise be counted as grains.
+2. Otsu threshold, tightened by a brightness-percentile floor -> rice on a
+   contrasting tray/paper background separates cleanly on brightness alone
+   in principle, but a real phone photo rarely has a uniform background:
+   glare, a light gradient, or a scratch/smudge on the surface can be just
+   bright enough that plain Otsu lumps them in with the grains as one
+   "foreground" class. Real grains under typical lighting (especially with
+   flash) are near-saturated highlights, dramatically brighter than that
+   kind of surface noise -- so the threshold is pulled toward whichever
+   brightness extreme grains sit at (a percentile of the whole image),
+   using Otsu's own value only as a starting point, never a looser one.
+3. Morphological opening + a per-blob solidity check -> strips tiny speckle
+   noise and rejects ragged, non-convex fragments (bits of a scratch or
+   shadow edge that survive thresholding) that a real grain's smooth
+   silhouette would never produce.
 4. Per-blob distance transform + watershed -> the actual hard part. Rice
    grains touch and overlap in almost every real photo, so a plain "count
    contours" pass undercounts by merging touching grains into one blob.
@@ -41,6 +50,10 @@ OPENING_KERNEL_SIZE = 3
 DIST_TRANSFORM_THRESH_RATIO = 0.5  # fraction of a blob's own max distance-transform value
 CLUSTER_PADDING = 3                # px of padding around each blob's crop for watershed
 MAX_FOREGROUND_RATIO = 0.35        # above this, the scene isn't "sparse objects on a background"
+FOREGROUND_PERCENTILE = 92          # assume grains cover at most ~8% of the frame; tightens Otsu
+MIN_GRAIN_SOLIDITY = 0.65           # contour area / convex-hull area; rejects ragged non-grain fragments
+MIN_GRAIN_ABSOLUTE_AREA_PX = 40     # floor under the ratio-based minimum: at only a few px, sensor
+                                     # noise/JPEG artifacts are trivially "solid" too small to shape-filter
 
 
 @dataclass
@@ -52,13 +65,69 @@ class BoundingBox:
     confidence: float
 
 
-def _order_background_foreground(binary: np.ndarray) -> np.ndarray:
-    """Otsu can invert which class (0/255) is foreground depending on the
-    image. Rice grains are assumed to be the minority-area class; flip the
-    mask if that assumption doesn't hold so foreground is always 255=grain.
+def _strict_foreground_mask(blurred: np.ndarray) -> np.ndarray:
+    """Threshold the image into grain=255/background=0, tightened against
+    uneven real-world lighting.
+
+    Otsu alone finds *a* split point in the brightness histogram, but a real
+    photo's "background" isn't one clean class -- it can span dim table to a
+    lit-up scratch or glare, all dimmer than an actual grain highlight.
+    Otsu can end up splitting between background and (scratch+grains)
+    instead of between (background+scratch) and grains.
+
+    Fix: figure out which side is the minority (grain) class the same way
+    Otsu would, then tighten the cut toward that class's own brightness
+    extreme -- using a percentile of the whole image as a floor/ceiling that
+    Otsu's value is only allowed to move toward, never away from. Percentile
+    is based on FOREGROUND_PERCENTILE assuming grains are a small minority
+    of the frame, which holds for any "grains scattered on a background"
+    photo without needing scene-specific tuning.
     """
-    white_ratio = np.count_nonzero(binary) / binary.size
-    return cv2.bitwise_not(binary) if white_ratio > 0.5 else binary
+    otsu_value, otsu_binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    white_ratio = np.count_nonzero(otsu_binary) / otsu_binary.size
+
+    if white_ratio > 0.5:
+        # Grains are the dark class -- tighten downward toward the dark extreme.
+        floor = np.percentile(blurred, 100 - FOREGROUND_PERCENTILE)
+        strict_value = min(otsu_value, floor)
+        _, binary = cv2.threshold(blurred, strict_value, 255, cv2.THRESH_BINARY_INV)
+    else:
+        # Grains are the bright class -- tighten upward toward the bright extreme.
+        ceiling = np.percentile(blurred, FOREGROUND_PERCENTILE)
+        strict_value = max(otsu_value, ceiling)
+        _, binary = cv2.threshold(blurred, strict_value, 255, cv2.THRESH_BINARY)
+
+    return binary
+
+
+def _is_grain_shaped(contour) -> bool:
+    """A real grain's silhouette is a smooth, solid blob. A fragment of a
+    scratch, shadow edge, or reflection that survives thresholding tends to
+    be ragged/non-convex instead -- solidity (contour area / convex-hull
+    area) tells them apart cheaply.
+    """
+    area = cv2.contourArea(contour)
+    if area <= 0:
+        return False
+    hull_area = cv2.contourArea(cv2.convexHull(contour))
+    if hull_area == 0:
+        return False
+    return (area / hull_area) >= MIN_GRAIN_SOLIDITY
+
+
+def _box_from_mask(mask: np.ndarray, offset_x: int = 0, offset_y: int = 0) -> "BoundingBox | None":
+    """Finds the mask's contour, rejects non-grain-shaped ones, and returns
+    a BoundingBox in full-image coordinates -- or None if it fails the
+    shape check.
+    """
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    contour = max(contours, key=cv2.contourArea)
+    if not _is_grain_shaped(contour):
+        return None
+    x, y, w, h = cv2.boundingRect(contour)
+    return _box_from_component(offset_x + x, offset_y + y, w, h)
 
 
 def _split_cluster(mask_crop: np.ndarray) -> List[np.ndarray]:
@@ -100,26 +169,32 @@ def _split_cluster(mask_crop: np.ndarray) -> List[np.ndarray]:
 def detect_rice(image_bgr: np.ndarray) -> List[BoundingBox]:
     height, width = image_bgr.shape[:2]
     image_area = height * width
-    min_area = image_area * MIN_GRAIN_AREA_RATIO
+    min_area = max(image_area * MIN_GRAIN_AREA_RATIO, MIN_GRAIN_ABSOLUTE_AREA_PX)
     max_area = image_area * MAX_GRAIN_AREA_RATIO
 
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
 
-    _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    binary = _order_background_foreground(binary)
+    # Sanity gate: checked on the LOOSE (untightened) Otsu split, deliberately
+    # separate from the strict mask below. A real "grains scattered on a
+    # plain background" photo splits nowhere near 50/50 even under plain
+    # Otsu -- grains are a small minority of the frame. A texture-less or
+    # noisy image (blank wall, sensor noise, bad lighting) has no true
+    # bimodal separation, so plain Otsu lands close to a 50/50 split. Using
+    # the loose split for this check (rather than the strict mask, which is
+    # tightened for a different purpose -- see _strict_foreground_mask)
+    # keeps the two concerns independent: tightening the detection threshold
+    # to reject a bright scratch shouldn't also blind this gate to noise.
+    _, loose_binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    loose_ratio = np.count_nonzero(loose_binary) / loose_binary.size
+    minority_ratio = min(loose_ratio, 1 - loose_ratio)
+    if minority_ratio > MAX_FOREGROUND_RATIO:
+        return []
+
+    binary = _strict_foreground_mask(blurred)
 
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (OPENING_KERNEL_SIZE, OPENING_KERNEL_SIZE))
     opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
-
-    # Sanity gate: a real "grains scattered on a plain tray" photo has a
-    # clearly sparse foreground. A texture-less or noisy photo (blank wall,
-    # sensor/JPEG noise, bad lighting) still gives Otsu *some* split point,
-    # which without this check would get reported as a field of tiny
-    # "grains" instead of correctly falling through to no_detections.
-    foreground_ratio = np.count_nonzero(opened) / opened.size
-    if foreground_ratio > MAX_FOREGROUND_RATIO:
-        return []
 
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(opened, connectivity=8)
 
@@ -136,8 +211,12 @@ def detect_rice(image_bgr: np.ndarray) -> List[BoundingBox]:
         h0 = stats[label, cv2.CC_STAT_HEIGHT]
 
         if area <= max_area:
-            # Already grain-sized on its own -- report directly, no split needed.
-            boxes.append(_box_from_component(x0, y0, w0, h0))
+            # Already grain-sized on its own -- report directly if it's
+            # actually grain-shaped (rejects compact-but-ragged noise blobs).
+            component_mask = np.uint8(labels == label) * 255
+            box = _box_from_mask(component_mask)
+            if box is not None:
+                boxes.append(box)
             continue
 
         # Larger than one grain: could be several touching grains, or a
@@ -155,11 +234,9 @@ def detect_rice(image_bgr: np.ndarray) -> List[BoundingBox]:
             sub_area = cv2.countNonZero(sub_mask)
             if sub_area < min_area or sub_area > max_area:
                 continue
-            contours, _ = cv2.findContours(sub_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            if not contours:
-                continue
-            sx, sy, sw, sh = cv2.boundingRect(max(contours, key=cv2.contourArea))
-            boxes.append(_box_from_component(x1 + sx, y1 + sy, sw, sh))
+            box = _box_from_mask(sub_mask, offset_x=x1, offset_y=y1)
+            if box is not None:
+                boxes.append(box)
 
     return boxes
 

@@ -38,6 +38,28 @@ def test_rice_detector_ignores_cones():
     assert len(detected) == 0
 
 
+def test_rice_detector_ignores_dim_surface_scratch():
+    """Regression test for a real bug report: a real phone photo of a dark
+    table had a faint diagonal scratch/smudge that plain Otsu thresholding
+    lumped in with the actual grain highlights as one "foreground" class,
+    reporting ~39 "grains" for a photo that had 5. The fix pulls the
+    threshold toward the true grain-brightness extreme instead of settling
+    for any split point Otsu finds -- this reproduces that scene shape
+    (a moderately-bright scratch + a few near-saturated grain highlights)
+    with known ground truth.
+    """
+    img = np.full((700, 500, 3), 35, dtype=np.uint8)
+    cv2.line(img, (150, 30), (280, 350), (75, 75, 75), 12)  # scratch: dimmer than real grains
+    rng = np.random.default_rng(1)
+    grain_centers = [(180, 480), (230, 500), (140, 560), (300, 470), (260, 610)]
+    for cx, cy in grain_centers:
+        angle = int(rng.integers(0, 180))
+        cv2.ellipse(img, (cx, cy), (12, 30), angle, 0, 360, (250, 250, 248), thickness=-1)
+
+    detected = detect_rice(img)
+    assert len(detected) == len(grain_centers)
+
+
 def test_blur_detection_flags_heavily_blurred_image():
     img, _, _ = make_test_image()
     blurred_img = cv2.GaussianBlur(img, (51, 51), 0)
