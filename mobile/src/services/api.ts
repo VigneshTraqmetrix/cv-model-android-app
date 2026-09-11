@@ -38,8 +38,13 @@ export async function analyzeImage(
     if (controller.signal.aborted) {
       throw new ApiError("The request timed out. Check your connection and try again.");
     }
+    // TEMP DEBUG: surface the raw underlying error so we can see exactly
+    // what RN's fetch/FormData layer is failing with, instead of only the
+    // generic message. Remove once the root cause is found.
+    console.error("analyzeImage fetch failed:", err);
+    const detail = err instanceof Error ? err.message : String(err);
     throw new ApiError(
-      "Could not reach the analysis server. Check that the backend is running and reachable."
+      `Could not reach the analysis server. Check that the backend is running and reachable. [debug: ${detail}]`
     );
   } finally {
     clearTimeout(timeout);
