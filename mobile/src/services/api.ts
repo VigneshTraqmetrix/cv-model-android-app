@@ -1,3 +1,5 @@
+import { File, UploadType } from "expo-file-system";
+
 import { API_BASE_URL, REQUEST_TIMEOUT_MS } from "@/config";
 import type { CapturedPhoto, CountMode, DetectionResponse } from "@/types";
 
@@ -5,54 +7,47 @@ export class ApiError extends Error {}
 
 /**
  * Uploads the captured photo to the /detect endpoint and returns the parsed
- * detection result. Network failures and non-200 responses are normalized
- * into ApiError so the UI has one error shape to handle.
+ * detection result.
+ *
+ * Uses expo-file-system's native multipart upload (File.upload) rather than
+ * fetch()+FormData: React Native's own FormData implementation only accepts
+ * real Blob/File instances or strings as parts, and rejects the classic
+ * `{uri, name, type}` object trick with "Unsupported FormDataPart
+ * implementation" (that trick worked on older RN versions but no longer
+ * does). expo-file-system's upload API is built specifically for streaming
+ * a local file into a multipart request and sidesteps that entirely.
  */
 export async function analyzeImage(
   photo: CapturedPhoto,
   mode: CountMode
 ): Promise<DetectionResponse> {
-  const formData = new FormData();
-  // React Native's fetch/FormData accepts this {uri, name, type} shape for
-  // file uploads -- it isn't a real Blob, but the RN networking layer knows
-  // how to stream it from the file:// uri.
-  formData.append("image", {
-    uri: photo.uri,
-    name: "capture.jpg",
-    type: "image/jpeg",
-  } as unknown as Blob);
-  formData.append("mode", mode);
-
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
-  let response: Response;
   try {
-    response = await fetch(`${API_BASE_URL}/detect`, {
-      method: "POST",
-      body: formData,
-      headers: { Accept: "application/json" },
+    const file = new File(photo.uri);
+    const result = await file.upload(`${API_BASE_URL}/detect`, {
+      uploadType: UploadType.MULTIPART,
+      fieldName: "image",
+      mimeType: "image/jpeg",
+      parameters: { mode },
       signal: controller.signal,
     });
+
+    if (result.status < 200 || result.status >= 300) {
+      throw new ApiError(`Server error (${result.status}). Please try again.`);
+    }
+
+    return JSON.parse(result.body) as DetectionResponse;
   } catch (err) {
+    if (err instanceof ApiError) throw err;
     if (controller.signal.aborted) {
       throw new ApiError("The request timed out. Check your connection and try again.");
     }
-    // TEMP DEBUG: surface the raw underlying error so we can see exactly
-    // what RN's fetch/FormData layer is failing with, instead of only the
-    // generic message. Remove once the root cause is found.
-    console.error("analyzeImage fetch failed:", err);
-    const detail = err instanceof Error ? err.message : String(err);
     throw new ApiError(
-      `Could not reach the analysis server. Check that the backend is running and reachable. [debug: ${detail}]`
+      "Could not reach the analysis server. Check that the backend is running and reachable."
     );
   } finally {
     clearTimeout(timeout);
   }
-
-  if (!response.ok) {
-    throw new ApiError(`Server error (${response.status}). Please try again.`);
-  }
-
-  return (await response.json()) as DetectionResponse;
 }
